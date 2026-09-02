@@ -1,52 +1,85 @@
 // Service Worker: macht die App nach dem ersten Laden offline nutzbar.
-// Cache-Strategie: "Cache-first, dann Netzwerk" für die App-Datei selbst (funktioniert immer
-// offline, sobald einmal geladen). Für externe CDN-Bibliotheken (Schrift, QR, Firebase) wird
-// zusätzlich versucht, sie beim ersten Laden mitzuspeichern — aber Funktionen, die zwingend
-// Internet brauchen (Lobby/Firebase-Verbindung), funktionieren logischerweise nie offline,
-// unabhängig vom Service Worker.
-const CACHE_NAME = 'splitterblatt-v1';
-const APP_SHELL = [
+//
+// Strategie:
+//  - Die App-Datei (index.html / Navigations-Requests) wird "network-first" ausgeliefert:
+//    solange das Gerät online ist, kommt IMMER die zuletzt deployte Version (wichtig, weil die
+//    gesamte Logik inkl. Regeln in index.html steckt). Nur offline wird auf die zuletzt
+//    gecachte Kopie zurückgefallen.
+//  - Alle anderen Dateien (Icons, Schrift, CDN-Bibliotheken für die Lobby) werden
+//    "cache-first, dann Netzwerk" bedient und beim ersten erfolgreichen Laden nachgecacht.
+//  - Funktionen, die zwingend Internet brauchen (Lobby/Firebase-Verbindung), funktionieren
+//    logischerweise nie offline, unabhängig vom Service Worker.
+//
+// Cache-Version: bei strukturellen Änderungen an dieser Datei hochzählen. Für App-Updates ist
+// das NICHT nötig — die kommen durch die network-first-Auslieferung von selbst.
+const CACHE = 'splitterblatt-v2';
+const PRECACHE = [
   './',
   './index.html',
   './manifest.json',
-  './firebase-config.js',
   './icons/icon-192.png',
   './icons/icon-512.png',
 ];
 
 self.addEventListener('install', event => {
-  event.waitUntil(
-    caches.open(CACHE_NAME).then(cache => cache.addAll(APP_SHELL)).catch(()=>{})
-  );
-  self.skipWaiting();
+  event.waitUntil((async () => {
+    const cache = await caches.open(CACHE);
+    // Einzeln statt cache.addAll(): so bricht ein einzelnes fehlendes Asset nicht den ganzen Precache ab.
+    await Promise.all(PRECACHE.map(url => cache.add(url).catch(() => {})));
+    self.skipWaiting();
+  })());
 });
 
 self.addEventListener('activate', event => {
-  event.waitUntil(
-    caches.keys().then(keys =>
-      Promise.all(keys.filter(k => k !== CACHE_NAME).map(k => caches.delete(k)))
-    )
-  );
-  self.clients.claim();
+  event.waitUntil((async () => {
+    const keys = await caches.keys();
+    await Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k)));
+    await self.clients.claim();
+  })());
 });
 
 self.addEventListener('fetch', event => {
   const req = event.request;
-  // Nur GET-Anfragen cachen (POST/PUT etc. — z.B. Firebase-Schreibzugriffe — unangetastet lassen).
-  if(req.method !== 'GET') return;
+  // Nur GET cachen (POST/PUT etc. — z. B. Firebase-Schreibzugriffe — unangetastet lassen).
+  if (req.method !== 'GET') return;
 
-  event.respondWith(
-    caches.match(req).then(cached => {
-      if(cached) return cached;
-      return fetch(req).then(res => {
-        // Erfolgreiche Antworten zusätzlich cachen (auch externe CDN-Dateien), damit ein
-        // zweiter Offline-Start auch diese enthält.
-        if(res && res.status === 200 && (res.type === 'basic' || res.type === 'cors')){
-          const resClone = res.clone();
-          caches.open(CACHE_NAME).then(cache => cache.put(req, resClone)).catch(()=>{});
+  const url = new URL(req.url);
+  const isAppShell =
+    req.mode === 'navigate' ||
+    url.pathname.endsWith('/') ||
+    url.pathname.endsWith('/index.html');
+
+  if (isAppShell) {
+    // network-first: online immer die frische App, offline die letzte gecachte Kopie.
+    event.respondWith((async () => {
+      try {
+        const res = await fetch(req);
+        if (res && res.status === 200) {
+          const cache = await caches.open(CACHE);
+          cache.put('./index.html', res.clone()).catch(() => {});
         }
         return res;
-      }).catch(() => cached); // offline und nicht im Cache: schlägt fehl (z.B. Firebase-Aufrufe)
-    })
-  );
+      } catch (e) {
+        const cached = await caches.match('./index.html') || await caches.match('./');
+        return cached || Response.error();
+      }
+    })());
+    return;
+  }
+
+  // Alles andere: cache-first, dann Netzwerk (und erfolgreiche Antworten nachcachen).
+  event.respondWith((async () => {
+    const cached = await caches.match(req);
+    if (cached) return cached;
+    try {
+      const res = await fetch(req);
+      if (res && res.status === 200 && (res.type === 'basic' || res.type === 'cors')) {
+        const cache = await caches.open(CACHE);
+        cache.put(req, res.clone()).catch(() => {});
+      }
+      return res;
+    } catch (e) {
+      return cached || Response.error();
+    }
+  })());
 });

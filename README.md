@@ -24,10 +24,53 @@ This is a personal/fan-made tool and is **not affiliated with or endorsed by Uhr
 
 Once hosted over `https://`, open the URL in your mobile browser and use "Add to Home Screen" (iOS Safari) or the install prompt (Android Chrome). This gives you a real app icon, full-screen launch, and offline access to the app itself (an internet connection is still required for the optional Lobby feature).
 
+## Hosting
+
+The app is a fully static site — any static host works. This repo is set up for **GitHub Pages**:
+
+1. Repo → **Settings → Pages** → Source: *Deploy from a branch*, branch `main`, folder `/ (root)`.
+2. The app is then live at `https://<user>.github.io/<repo>/`.
+3. Every path in the app is relative, so it also runs from a sub-path or a plain local file server (`python -m http.server` etc.).
+
+### Updates and the service worker
+
+[`sw.js`](sw.js) serves `index.html` **network-first**: while the device is online it always loads the latest deployed version, and only falls back to the cached copy when offline. Icons, fonts and the Lobby's CDN libraries are cached cache-first. So a normal deploy reaches every device on its next online launch — no cache-busting needed.
+
+If a device ever seems stuck on an old build, use **⚙ Settings → "App-Cache leeren & neu laden"** in the app (keeps all characters and settings), or bump `CACHE` in `sw.js`.
+
+## Settings (⚙, top right)
+
+- **Debug-Protokoll** — logs every Lobby connection step (ICE gathering, Firebase room, data channel, timeouts) into the bottom log. Turn it on before reporting a connection problem.
+- **Backup** — export/import the full state (all characters + settings) as JSON. The export also contains your uploaded Firebase config, so treat the backup file as private.
+- **Lobby-Verbindung (Firebase)** — upload / replace / remove the Firebase config (also reachable from the Lobby panel).
+- **Cache & Speicher** — clear the PWA cache, or wipe all local data on this device (with confirmation).
+
 ## Multiplayer Lobby setup (optional)
 
 The Lobby feature lets multiple devices see a shared, live combat overview. It uses [Firebase Realtime Database](https://firebase.google.com/) purely to help two devices find each other (a temporary "room code" exchange) — the actual connection runs directly between devices afterward, and no character or session data ever passes through Firebase.
-Each device that wants to use the Lobby needs its own copy of the Firebase config uploaded once. One player creates a lobby and shares the generated room code; others join with that code.
+Each device that wants to use the Lobby needs its own copy of the Firebase config uploaded once (⚙ Settings → *Lobby-Verbindung*, or the Lobby panel). One player creates a lobby and shares the generated room code; others join with that code.
+
+The WebRTC connection is peer-to-peer with a public STUN server and **no TURN relay**, so it is designed for devices **on the same local network / table**. Cross-network play (e.g. two households on mobile data) often fails at NAT traversal — the debug log will then show `0 via STUN` / a stuck `connecting` state.
+
+### Realtime Database rules
+
+The Lobby only ever needs a short-lived `rooms/<code>` node for the WebRTC handshake. Lock the database down to exactly that in Firebase Console → Realtime Database → **Rules**:
+
+```json
+{
+  "rules": {
+    "rooms": {
+      "$code": {
+        ".read": true,
+        ".write": true,
+        ".validate": "newData.hasChild('offer') || newData.hasChild('answer')"
+      }
+    }
+  }
+}
+```
+
+Rooms are removed automatically once the connection is established, when the host leaves the Lobby, and on tab close (`onDisconnect`). The handshake payload contains local network addresses (normal for WebRTC), so anyone with the 6-character code can read it during the few seconds a room is open — treat room codes as single-use.
 
 ## License
 
