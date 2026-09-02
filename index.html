@@ -521,12 +521,12 @@ function loadData(){
     const raw = localStorage.getItem(STORAGE_KEY);
     if(raw) return JSON.parse(raw);
   }catch(e){ console.warn('Konnte Daten nicht laden', e); }
-  return { characters: [], activeCharId: null, log: [], combatActive: false, firebaseSettings: { config: null, sharedKey: '' } };
+  return { characters: [], activeCharId: null, log: [], combatActive: false, firebaseSettings: { config: null } };
 }
 let DATA = loadData();
 if(!Array.isArray(DATA.log)) DATA.log = [];
 if(DATA.combatActive===undefined) DATA.combatActive = false;
-if(!DATA.firebaseSettings) DATA.firebaseSettings = { config: null, sharedKey: '' };
+if(!DATA.firebaseSettings) DATA.firebaseSettings = { config: null };
 function save(){
   try{ localStorage.setItem(STORAGE_KEY, JSON.stringify(DATA)); }
   catch(e){ console.warn('Konnte nicht speichern', e); }
@@ -2565,12 +2565,12 @@ const RTC_CONFIG = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
 // projektspezifischen Zugangsdaten mehr — sie lässt sich bedenkenlos weitergeben/neu laden,
 // ohne dass jemand automatisch Zugriff auf deine Firebase-Instanz bekommt.
 function ensureFirebaseSettings(){
-  if(!DATA.firebaseSettings) DATA.firebaseSettings = { config: null, sharedKey: '' };
+  if(!DATA.firebaseSettings) DATA.firebaseSettings = { config: null };
 }
 function firebaseConfigured(){
   ensureFirebaseSettings();
   const cfg = DATA.firebaseSettings.config;
-  return !!(cfg && cfg.apiKey && cfg.databaseURL && DATA.firebaseSettings.sharedKey);
+  return !!(cfg && cfg.apiKey && cfg.databaseURL);
 }
 let fbDb = null;
 let fbActiveListenerRef = null;
@@ -2631,79 +2631,83 @@ function handleFirebaseConfigUpload(evt){
   reader.readAsText(file);
   evt.target.value = '';
 }
-function saveSharedKeyInput(){
-  ensureFirebaseSettings();
-  DATA.firebaseSettings.sharedKey = document.getElementById('fbSharedKeyInput').value.trim();
-  fbDb = null;
-  save();
-  renderLobbyPanel();
-}
 function clearFirebaseSettings(){
   appConfirm('Firebase-Einrichtung wirklich entfernen? Die Lobby-Funktion ist danach deaktiviert, bis neu eingerichtet wird.', ()=>{
-    DATA.firebaseSettings = { config: null, sharedKey: '' };
+    DATA.firebaseSettings = { config: null };
     fbDb = null;
     save();
     renderLobbyPanel();
   });
 }
-// Kurzer, gut lesbarer Raum-Code (ohne verwechselbare Zeichen 0/O/1/I).
+// Raum-Code (ohne verwechselbare Zeichen 0/O/1/I) — 6 Stellen statt 4, um den Wegfall des
+// gemeinsamen Schlüssels auszugleichen: ~32^6 ≈ 1,07 Mrd. mögliche Codes statt ~1,05 Mio.,
+// zusätzlich sind Räume ohnehin nur Sekunden gültig.
 function genRoomCode(){
   const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   let code = '';
-  for(let i=0;i<4;i++) code += alphabet[Math.floor(Math.random()*alphabet.length)];
+  for(let i=0;i<6;i++) code += alphabet[Math.floor(Math.random()*alphabet.length)];
   return code;
 }
+let firebaseHostBusy = false; // verhindert, dass wiederholtes Tippen mehrfach neue Räume erzeugt
 async function startFirebaseHost(){
-  const ok = await ensureFirebaseLoaded();
-  if(!ok){ alert('Firebase ist noch nicht eingerichtet — FIREBASE_CONFIG in der Datei ausfüllen (siehe Kommentar im Quelltext).'); return; }
-  ensureLobbyState();
-  if(!DATA.lobby.active){
-    DATA.lobby.active = true;
-    DATA.lobby.isHost = true;
-    DATA.lobby.myPeerId = 'host';
-    DATA.lobby.myName = DATA.lobby.myPlayerName;
-    save();
-    requestWakeLock();
-    addLogEntry(`📡 Lobby erstellt (Name: ${DATA.lobby.myName})`);
-    renderLobbyPanel();
-  }
-  const code = genRoomCode();
-  const peerId = 'p_' + uid();
-  currentSetupPeerId = peerId;
-  const pc = new RTCPeerConnection(RTC_CONFIG);
-  lobbyRuntime.connections[peerId] = pc;
-  const channel = pc.createDataChannel('splittermond');
-  setupDataChannelHandlers(peerId, channel);
-  pc.onconnectionstatechange = ()=>{
-    if(['disconnected','failed','closed'].includes(pc.connectionState)) setPeerStatus(peerId, 'offline');
-  };
-  const offer = await pc.createOffer();
-  await pc.setLocalDescription(offer);
-  await waitForIceGatheringComplete(pc);
-  setPeerStatus(peerId, 'connecting');
-  await fbDb.ref('rooms/'+DATA.firebaseSettings.sharedKey+'/'+code).set({ offer: JSON.stringify(pc.localDescription), createdAt: Date.now() });
-  const area = document.getElementById('lobbySetupArea');
-  area.innerHTML = `
-    <div class="card">
-      <div class="card-title">Raum-Code</div>
-      <div class="hint">Gib diesen Code dem Mitspieler — sonst ist nichts weiter nötig.</div>
-      <div style="font-family:'Spectral'; font-weight:700; font-size:2.2rem; text-align:center; letter-spacing:0.15em; color:var(--moon); margin:10px 0;">${code}</div>
-      <div class="hint" id="fbHostStatus">Warte auf Mitspieler …</div>
-    </div>`;
-  const answerRef = fbDb.ref('rooms/'+DATA.firebaseSettings.sharedKey+'/'+code+'/answer');
-  fbActiveListenerRef = answerRef;
-  answerRef.on('value', async snap=>{
-    const val = snap.val();
-    if(val && pc.signalingState==='have-local-offer'){
-      await pc.setRemoteDescription(JSON.parse(val));
-      const statusEl = document.getElementById('fbHostStatus');
-      if(statusEl) statusEl.innerHTML = `Antwort erhalten, verbinde … (noch <span id="connectCountdown_${peerId}">120</span>s)`;
-      armConnectTimeout(peerId, pc);
-      answerRef.off('value');
-      fbActiveListenerRef = null;
-      setTimeout(()=> fbDb.ref('rooms/'+DATA.firebaseSettings.sharedKey+'/'+code).remove().catch(()=>{}), 15000); // Aufräumen im Firebase-Raum
+  if(firebaseHostBusy) return;
+  firebaseHostBusy = true;
+  const areaEarly = document.getElementById('lobbySetupArea');
+  if(areaEarly) areaEarly.innerHTML = '<div class="hint">Erstelle Raum …</div>'; // sofortiges Feedback, bevor irgendwas asynchrones läuft
+  try{
+    const ok = await ensureFirebaseLoaded();
+    if(!ok){ alert('Firebase ist noch nicht eingerichtet — Config über den Upload-Knopf hochladen.'); return; }
+    ensureLobbyState();
+    if(!DATA.lobby.active){
+      DATA.lobby.active = true;
+      DATA.lobby.isHost = true;
+      DATA.lobby.myPeerId = 'host';
+      DATA.lobby.myName = DATA.lobby.myPlayerName;
+      save();
+      requestWakeLock();
+      addLogEntry(`📡 Lobby erstellt (Name: ${DATA.lobby.myName})`);
+      renderLobbyPanel();
     }
-  });
+    const code = genRoomCode();
+    const peerId = 'p_' + uid();
+    currentSetupPeerId = peerId;
+    const pc = new RTCPeerConnection(RTC_CONFIG);
+    lobbyRuntime.connections[peerId] = pc;
+    const channel = pc.createDataChannel('splittermond');
+    setupDataChannelHandlers(peerId, channel);
+    pc.onconnectionstatechange = ()=>{
+      if(['disconnected','failed','closed'].includes(pc.connectionState)) setPeerStatus(peerId, 'offline');
+    };
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    await waitForIceGatheringComplete(pc);
+    setPeerStatus(peerId, 'connecting');
+    await fbDb.ref('rooms/'+code).set({ offer: JSON.stringify(pc.localDescription), createdAt: Date.now() });
+    const area = document.getElementById('lobbySetupArea');
+    area.innerHTML = `
+      <div class="card">
+        <div class="card-title">Raum-Code</div>
+        <div class="hint">Gib diesen Code dem Mitspieler — sonst ist nichts weiter nötig.</div>
+        <div style="font-family:'Spectral'; font-weight:700; font-size:2.2rem; text-align:center; letter-spacing:0.15em; color:var(--moon); margin:10px 0;">${code}</div>
+        <div class="hint" id="fbHostStatus">Warte auf Mitspieler …</div>
+      </div>`;
+    const answerRef = fbDb.ref('rooms/'+code+'/answer');
+    fbActiveListenerRef = answerRef;
+    answerRef.on('value', async snap=>{
+      const val = snap.val();
+      if(val && pc.signalingState==='have-local-offer'){
+        await pc.setRemoteDescription(JSON.parse(val));
+        const statusEl = document.getElementById('fbHostStatus');
+        if(statusEl) statusEl.innerHTML = `Antwort erhalten, verbinde … (noch <span id="connectCountdown_${peerId}">120</span>s)`;
+        armConnectTimeout(peerId, pc);
+        answerRef.off('value');
+        fbActiveListenerRef = null;
+        setTimeout(()=> fbDb.ref('rooms/'+code).remove().catch(()=>{}), 15000); // Aufräumen im Firebase-Raum
+      }
+    });
+  } finally {
+    firebaseHostBusy = false;
+  }
 }
 async function showFirebaseJoinForm(){
   const ok = await ensureFirebaseLoaded();
@@ -2715,43 +2719,52 @@ async function showFirebaseJoinForm(){
   area.innerHTML = `
     <div class="card">
       <div class="card-title">Mit Raum-Code beitreten</div>
-      <input id="fbRoomCodeInput" style="text-transform:uppercase; font-size:1.4rem; text-align:center; letter-spacing:0.15em;" maxlength="4" placeholder="ABCD">
+      <input id="fbRoomCodeInput" style="text-transform:uppercase; font-size:1.4rem; text-align:center; letter-spacing:0.15em;" maxlength="6" placeholder="ABCDEF">
       <button class="btn-primary" style="width:100%; margin-top:8px;" onclick="joinFirebaseRoom()">Verbinden</button>
     </div>`;
 }
+let firebaseJoinBusy = false; // verhindert Mehrfach-Beitritt durch wiederholtes Tippen
 async function joinFirebaseRoom(){
+  if(firebaseJoinBusy) return;
   const code = document.getElementById('fbRoomCodeInput').value.trim().toUpperCase();
   if(!code){ alert('Bitte einen Code eintragen.'); return; }
-  let offerRaw;
+  firebaseJoinBusy = true;
+  const areaEarly = document.getElementById('lobbySetupArea');
+  if(areaEarly) areaEarly.innerHTML = '<div class="hint">Verbinde …</div>';
   try{
-    const snap = await fbDb.ref('rooms/'+DATA.firebaseSettings.sharedKey+'/'+code+'/offer').get();
-    offerRaw = snap.val();
-  }catch(e){ alert('Firebase-Anfrage fehlgeschlagen — Internetverbindung prüfen.'); return; }
-  if(!offerRaw){ alert('Kein Raum mit diesem Code gefunden (falscher Code oder bereits abgelaufen).'); return; }
-  ensureLobbyState();
-  DATA.lobby.active = true;
-  DATA.lobby.isHost = false;
-  DATA.lobby.myPeerId = 'me_' + uid();
-  DATA.lobby.myName = DATA.lobby.myPlayerName;
-  save();
-  requestWakeLock();
-  addLogEntry(`📡 Lobby ${code} beigetreten (Name: ${DATA.lobby.myName}) …`);
-  renderLobbyPanel();
-  currentSetupPeerId = 'host';
-  const pc = new RTCPeerConnection(RTC_CONFIG);
-  lobbyRuntime.connections['host'] = pc;
-  pc.onconnectionstatechange = ()=>{
-    if(['disconnected','failed','closed'].includes(pc.connectionState)) setPeerStatus('host', 'offline');
-  };
-  pc.ondatachannel = e=> setupDataChannelHandlers('host', e.channel);
-  await pc.setRemoteDescription(JSON.parse(offerRaw));
-  const answer = await pc.createAnswer();
-  await pc.setLocalDescription(answer);
-  await waitForIceGatheringComplete(pc);
-  setPeerStatus('host', 'connecting');
-  await fbDb.ref('rooms/'+DATA.firebaseSettings.sharedKey+'/'+code+'/answer').set(JSON.stringify(pc.localDescription));
-  armConnectTimeout('host', pc);
-  document.getElementById('lobbySetupArea').innerHTML = `<div class="card"><div class="hint">Verbindung wird aufgebaut … (noch <span id="connectCountdown_host">120</span>s)</div></div>`;
+    let offerRaw;
+    try{
+      const snap = await fbDb.ref('rooms/'+code+'/offer').get();
+      offerRaw = snap.val();
+    }catch(e){ alert('Firebase-Anfrage fehlgeschlagen — Internetverbindung prüfen.'); return; }
+    if(!offerRaw){ alert('Kein Raum mit diesem Code gefunden (falscher Code oder bereits abgelaufen).'); return; }
+    ensureLobbyState();
+    DATA.lobby.active = true;
+    DATA.lobby.isHost = false;
+    DATA.lobby.myPeerId = 'me_' + uid();
+    DATA.lobby.myName = DATA.lobby.myPlayerName;
+    save();
+    requestWakeLock();
+    addLogEntry(`📡 Lobby ${code} beigetreten (Name: ${DATA.lobby.myName}) …`);
+    renderLobbyPanel();
+    currentSetupPeerId = 'host';
+    const pc = new RTCPeerConnection(RTC_CONFIG);
+    lobbyRuntime.connections['host'] = pc;
+    pc.onconnectionstatechange = ()=>{
+      if(['disconnected','failed','closed'].includes(pc.connectionState)) setPeerStatus('host', 'offline');
+    };
+    pc.ondatachannel = e=> setupDataChannelHandlers('host', e.channel);
+    await pc.setRemoteDescription(JSON.parse(offerRaw));
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+    await waitForIceGatheringComplete(pc);
+    setPeerStatus('host', 'connecting');
+    await fbDb.ref('rooms/'+code+'/answer').set(JSON.stringify(pc.localDescription));
+    armConnectTimeout('host', pc);
+    document.getElementById('lobbySetupArea').innerHTML = `<div class="card"><div class="hint">Verbindung wird aufgebaut … (noch <span id="connectCountdown_host">120</span>s)</div></div>`;
+  } finally {
+    firebaseJoinBusy = false;
+  }
 }
 // ^ STUN ist kein Datenserver — er hilft nur beim Ermitteln der eigenen Netzwerkadresse, damit
 // sich die Geräte finden. Es fließen keine App-Daten darüber.
@@ -2859,9 +2872,7 @@ function renderLobbyPanel(){
         <input type="file" id="fbConfigFile" accept=".json,application/json,.js,.txt" style="display:none" onchange="handleFirebaseConfigUpload(event)">
         <button class="btn-ghost btn-sm" onclick="document.getElementById('fbConfigFile').click()">Config-Datei hochladen</button>
         <div class="hint">${DATA.firebaseSettings.config ? '✅ Config gespeichert (Projekt: '+escapeHtml(DATA.firebaseSettings.config.projectId||'?')+')' : 'Noch keine Config hochgeladen.'}</div>
-        <label style="margin-top:8px;">Gemeinsamer Schlüssel (Raum-Absicherung, mit deiner Gruppe abgesprochen)</label>
-        <input id="fbSharedKeyInput" value="${escapeHtml(DATA.firebaseSettings.sharedKey||'')}" placeholder="z. B. bo-eisenstirn-kampagne-2026" onchange="saveSharedKeyInput()">
-        ${(DATA.firebaseSettings.config || DATA.firebaseSettings.sharedKey) ? `<button class="btn-danger btn-sm" style="margin-top:8px; width:100%;" onclick="clearFirebaseSettings()">Firebase-Einrichtung entfernen</button>` : ''}
+        ${DATA.firebaseSettings.config ? `<button class="btn-danger btn-sm" style="margin-top:8px; width:100%;" onclick="clearFirebaseSettings()">Firebase-Einrichtung entfernen</button>` : ''}
       </div>`;
     return;
   }
@@ -2869,6 +2880,7 @@ function renderLobbyPanel(){
     <div class="card">
       <div class="card-title">Lobby <small>${L.isHost?'Host':'Verbunden mit Host'}${L.myName?' — '+escapeHtml(L.myName):''} <button class="close-x" style="font-size:0.7rem;" onclick="changePlayerName()">✎</button></small></div>
       <div id="lobbyPeerRows">${peerRowsHtml(L)}</div>
+      <button class="btn-ghost btn-sm" style="margin-top:6px" onclick="removeAllStalePeers()">Unverbundene Einträge entfernen</button>
       ${L.isHost ? `<button class="btn-ghost btn-sm" style="margin-top:8px" onclick="startFirebaseHost()">+ Weiteren Mitspieler verbinden</button>` : ''}
       <button class="btn-danger btn-sm" style="margin-top:8px; width:100%;" onclick="confirmLeaveLobby()">Lobby verlassen (alles vergessen)</button>
     </div>
@@ -2989,6 +3001,24 @@ function removePeer(peerId){
   save();
   renderLobbyPanel();
   renderCombatPanel();
+}
+// Entfernt alle nicht-verbundenen Einträge auf einmal (z.B. viele "Mitspieler N (verbindet…)"
+// durch wiederholtes Tippen) — lässt echte, verbundene Mitspieler unangetastet.
+function removeAllStalePeers(){
+  const stale = Object.keys(DATA.lobby.peers).filter(id => DATA.lobby.peers[id].status !== 'online');
+  if(!stale.length){ alert('Keine unverbundenen Einträge zum Entfernen.'); return; }
+  appConfirm(`${stale.length} unverbundene Einträge entfernen? Verbundene Mitspieler bleiben erhalten.`, ()=>{
+    stale.forEach(id=>{
+      try{ lobbyRuntime.connections[id]?.close(); }catch(e){}
+      delete lobbyRuntime.connections[id];
+      delete lobbyRuntime.channels[id];
+      delete DATA.lobby.peers[id];
+    });
+    addLogEntry(`📡 ${stale.length} unverbundene Einträge auf einmal entfernt`);
+    save();
+    renderLobbyPanel();
+    renderCombatPanel();
+  });
 }
 
 /* ---- Nachrichtenprotokoll ---- */
