@@ -338,6 +338,32 @@ body{ padding-bottom: 46px; }
 .settings-box .card{ background:var(--surface-2); }
 .toggle-row{ display:flex; align-items:center; justify-content:space-between; gap:10px; }
 .toggle-row input{ width:auto; }
+
+/* ---------- Responsive: auf breiten Screens den Platz nutzen statt Rand verschenken ---------- */
+@media (min-width: 900px){
+  .panel{ max-width: 1140px; padding-left: 20px; padding-right: 20px; }
+
+  /* Charakterbogen: Karten in Spalten fließen lassen, statt endlos untereinander zu scrollen.
+     Der Kampf-Panel-Split (zweite Spalte) bleibt davon unberührt — dann wird bogen-sheet
+     schmaler und fällt automatisch auf eine Spalte zurück. */
+  .bogen-layout:not(.split) .bogen-sheet{ column-width: 330px; column-gap: 16px; }
+  .bogen-layout:not(.split) .bogen-sheet > .card,
+  .bogen-layout:not(.split) .bogen-sheet > .details-card{
+    break-inside: avoid; -webkit-column-break-inside: avoid; margin-top: 0;
+  }
+
+  /* Charakterliste zwei- bis dreispaltig, Genesis-Import daneben in normaler Breite */
+  #charList{ display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 8px; align-content: start; }
+  #charList .char-chip{ margin-bottom: 0; }
+  #panel-chars > .card{ max-width: 620px; }
+  #panel-chars > .btn-primary{ width: auto !important; min-width: 240px; margin-top: 12px; }
+
+  /* Editor-Formular: mehr Breite, damit die Zeilen atmen */
+  #panel-charEditor .card{ max-width: 900px; margin: 0 auto; }
+}
+@media (min-width: 1500px){
+  .panel{ max-width: 1400px; }
+}
 </style>
 </head>
 <body>
@@ -399,15 +425,7 @@ body{ padding-bottom: 46px; }
     </div>
   </div>
 
-  <div class="card" style="margin-top:10px;">
-    <div class="card-title">Backup (dieses Tool)</div>
-    <div class="hint">Sichere alle Charaktere als JSON-Datei, oder importiere eine zuvor exportierte Datei.</div>
-    <div class="btn-row">
-      <button class="btn-ghost" onclick="exportData()">Exportieren</button>
-      <button class="btn-ghost" onclick="document.getElementById('importFile').click()">Importieren</button>
-      <input type="file" id="importFile" accept="application/json" style="display:none" onchange="importData(event)">
-    </div>
-  </div>
+  <div class="hint" style="margin-top:10px;">Backup (alle Charaktere sichern/wiederherstellen) findest du jetzt unter ⚙ Einstellungen.</div>
 </div>
 
 <div class="panel" id="panel-charEditor">
