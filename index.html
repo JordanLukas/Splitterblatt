@@ -3043,7 +3043,11 @@ function rebuildAndBroadcastRoster(){
   const own = DATA.characters.filter(c=>c.combatOpen).map(c=>({ownerPeerId:'host', ownerName:DATA.lobby.myName, charName:c.name, tick:c.tick}));
   const remote = [];
   Object.values(DATA.lobby.peers).forEach(p=>{
-    (p.lastEntries||[]).forEach(e=>remote.push({ownerPeerId:p.id, ownerName:p.name, charName:e.charName, tick:e.tick}));
+    // Der Absender selbst weiß nur, was er sich selbst als ID gegeben hat (remotePeerId) —
+    // NICHT unsere interne Verbindungs-ID (p.id). Muss übereinstimmen, damit sein "das bin
+    // ich selbst"-Filter auf der Empfängerseite korrekt greift, statt die eigene Zeile fälschlich
+    // als fremd (📡) mitzuzählen.
+    (p.lastEntries||[]).forEach(e=>remote.push({ownerPeerId:p.remotePeerId||p.id, ownerName:p.name, charName:e.charName, tick:e.tick}));
   });
   DATA.lobby.remoteRoster = own.concat(remote);
   save();
@@ -3057,6 +3061,10 @@ function handleLobbyMessage(peerId, msg){
     const p = DATA.lobby.peers[peerId];
     const nameChanged = p.name !== msg.name && msg.name;
     p.name = msg.name;
+    p.remotePeerId = msg.peerId; // die ID, unter der der Absender SICH SELBST kennt — nicht
+    // zu verwechseln mit "peerId" hier, das ist unsere eigene interne Verbindungs-ID für ihn.
+    // Wird beim Rundsenden der Kampfübersicht gebraucht, damit jeder seine eigene Zeile korrekt
+    // als "das bin ich" erkennt (siehe rebuildAndBroadcastRoster).
     p.lastEntries = msg.entries;
     save();
     refreshPeerRows();
